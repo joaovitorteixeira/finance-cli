@@ -1,9 +1,11 @@
 use rdkafka::Message;
 use rdkafka::consumer::Consumer;
 use rdkafka::consumer::StreamConsumer;
+use rdkafka::message::BorrowedMessage;
 use serde_json::Value;
 
 mod utils;
+mod worker;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,22 +19,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(err) => {
                 eprintln!("Kafka error: {}", err);
             }
-            Ok(message) => {
-                let Some(payload) = message.payload() else {
-                    if let Err(err) = consumer.store_offset_from_message(&message) {
-                        eprintln!("Error while storing offset: {:?}", err);
+            Ok(mut message) => {
+                let topic = message.topic();
+                message = {
+                    if let Ok((payload, _message)) = validate_received_message(&message) {
+                        match topic {
+                            "category.create" => worker::create::handler(payload),
+                            _ => eprintln!("Topic does not match"),
+                        };
+                    } else {
+                        eprintln!("Falied to process message");
                     }
-                    continue;
+                    message
                 };
-                // remove unwrap
-                let parsed_payload: Value =
-                    serde_json::from_str(std::str::from_utf8(payload).unwrap())?;
 
-                eprintln!("New message: {}", parsed_payload["orderid"]);
                 if let Err(err) = consumer.store_offset_from_message(&message) {
                     eprintln!("Error while storing offset: {:?}", err);
                 }
             }
         }
     }
+}
+
+fn validate_received_message<'a>(
+    message: &'a BorrowedMessage,
+) -> Result<(Value, &'a BorrowedMessage<'a>), String> {
+    let Some(payload) = message.payload() else {
+        return Err(String::from("Can't get the message payload"));
+    };
+    let Ok(parsed_payload) = serde_json::from_slice::<Value>(payload) else {
+        return Err(String::from("Can't parse the message"));
+    };
+
+    Ok((parsed_payload, message))
 }
